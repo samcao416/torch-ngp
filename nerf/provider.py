@@ -85,6 +85,60 @@ def rand_poses(size, device, radius=1, theta_range=[np.pi/3, 2*np.pi/3], phi_ran
 
     return poses
 
+def ngp_matrix_to_nerf(pose, scale = 0.33):
+    new_pose = np.array([
+        [pose[2, 0], -pose[2, 1], -pose[2, 2], pose[2, 3] / scale],
+        [pose[0, 0], -pose[0, 1], -pose[0, 2], pose[0, 3] / scale],
+        [pose[1, 0], -pose[1, 1], -pose[1, 2], pose[1, 3] / scale],
+        [0, 0, 0, 1]
+    ], dtype=np.float32)
+    return new_pose
+
+def write_cam_tra_json(old_json, poses, target_path):
+    angle_x = old_json["camera_angle_x"]
+    angle_y = old_json["camera_angle_y"]
+    f = old_json["fl_x"]
+    k1 = old_json["k1"]
+    k2 = old_json["k2"]
+    p1 = old_json["p1"]
+    p2 = old_json["p2"]
+    b1 = old_json["b1"]
+    b2 = old_json["b2"]
+    cx = old_json["cx"]
+    cy = old_json["cy"]
+    width = old_json["w"]
+    height = old_json['h']
+    AABB_SCALE = old_json["aabb_scale"]
+
+    out = {
+        "camera_angle_x" : angle_x,
+        "camera_angle_y" : angle_y,
+        "fl_x" : f,
+        "fl_y" : f,
+        "k1" : k1,
+        "k2" : k2,
+        "p1" : p1,
+        "p2" : p2,
+        "b1" : b1,
+        "b2" : b2,
+        "cx" : cx,
+        "cy" : cy,
+        "w" : width,
+        "h" : height,
+        "aabb_scale" : AABB_SCALE,
+        "frames" : [],
+    }
+
+    for i in range(len(poses)):
+        name = os.path.join("out_images", '%04d.png' %(i))
+        frame = {"file_path" : name, "transform_matrix" : poses[i]}
+        out["frames"].append(frame)
+    for f in out["frames"]:
+        f["transform_matrix"] = f["transform_matrix"].tolist()
+    print(f"writing {target_path}")
+    with open(target_path, "w") as outfile:
+        json.dump(out, outfile, indent=2)
+    return 1
 
 class NeRFDataset:
     def __init__(self, opt, device, type='train', downscale=1, n_test=10):
@@ -95,7 +149,7 @@ class NeRFDataset:
         self.type = type # train, val, test
         self.downscale = downscale
         self.root_path = opt.path
-        self.mode = opt.mode # colmap, blender, llff
+        self.mode = opt.mode # colmap, blender, llff, agi
         self.preload = opt.preload # preload data into GPU
         self.scale = opt.scale # camera radius scale to make sure camera are inside the bounding box.
         self.bound = opt.bound # bounding box half length, also used as the radius to random sample poses.
@@ -107,7 +161,7 @@ class NeRFDataset:
         self.rand_pose = opt.rand_pose
 
         # load nerf-compatible format data.
-        if self.mode == 'colmap':
+        if self.mode == 'colmap' or 'agi':
             with open(os.path.join(self.root_path, 'transforms.json'), 'r') as f:
                 transform = json.load(f)
         elif self.mode == 'blender':
@@ -143,6 +197,7 @@ class NeRFDataset:
         frames = sorted(frames, key=lambda d: d['file_path'])    
         
         # for colmap, manually interpolate a test set.
+        '''
         if self.mode == 'colmap' and type == 'test':
             
             # choose two random poses, and interpolate between.
@@ -160,6 +215,71 @@ class NeRFDataset:
                 pose[:3, :3] = slerp(ratio).as_matrix()
                 pose[:3, 3] = (1 - ratio) * pose0[:3, 3] + ratio * pose1[:3, 3]
                 self.poses.append(pose)
+        '''
+        if (self.mode == 'agi' or 'colmap') and type == 'test':
+            # use a camera trajectory to prepare pose and render views
+            # if the camera trajectory json file does not exist, then create one
+            cam_tra_path = os.path.join(self.root_path, 'cam_tra', 'camera_render.json')
+            self.poses = []
+            self.images = None
+            if os.path.exists(cam_tra_path):
+                print("Camera trajectory exists")
+                with open(cam_tra_path, 'r') as f:
+                    cam_tra = json.load(f)
+                
+                # Read the focal
+                fl_x = self.W / (2 * np.tan(cam_tra['camera_angle_x'] / 2)) if 'camera_angle_x' in cam_tra else None
+                fl_y = self.H / (2 * np.tan(cam_tra['camera_angle_y'] / 2)) if 'camera_angle_y' in cam_tra else None
+                if fl_x is None: fl_x = fl_y
+                if fl_y is None: fl_y = fl_x
+
+                # Read the extrinsic
+                self.cam_num = len(cam_tra['frames'])
+                for i in range(self.cam_num):
+                    pose = nerf_matrix_to_ngp(np.array(cam_tra['frames'][i]['transform_matrix'], dtype = np.float32), scale = self.scale)
+                    self.poses.append(pose)
+                
+            else:
+                print("Camera trajectory not exists, will generate one and save it")
+                if not os.path.exists(os.path.join(self.root_path, 'cam_tra')):
+                    os.makedirs(os.path.join(self.root_path, 'cam_tra'))
+                # Initialize number of test frames
+                n_test = 120
+                
+                # Focal part, use the same camera_angles and fl_x and fl_y
+                cam_angle_x = transform['camera_angle_x']
+                cam_angle_y = transform['camera_angle_y']
+                fl_x = transform['fl_x']
+                fl_y = transform['fl_y']
+
+                # Camera Pose Part, The Slerp Method
+                
+                f0, f1 = frames[1], frames[-1] # choose 2 views as fern2v from fern 20 views
+
+                pose0 = nerf_matrix_to_ngp(np.array(f0['transform_matrix'], dtype=np.float32), scale=self.scale) # [4, 4]
+                pose1 = nerf_matrix_to_ngp(np.array(f1['transform_matrix'], dtype=np.float32), scale=self.scale) # [4, 4]
+                rots = Rotation.from_matrix(np.stack([pose0[:3, :3], pose1[:3, :3]]))
+                slerp = Slerp([0, 1], rots)
+
+                self.poses = []
+                poses_in_opengl = []
+                
+
+                for i in range(n_test + 1):
+                    ratio = np.sin(((i / n_test) - 0.5) * np.pi) * 0.5 + 0.5
+                    pose = np.eye(4, dtype=np.float32)
+                    pose[:3, :3] = slerp(ratio).as_matrix()
+                    pose[:3, 3] = (1 - ratio) * pose0[:3, 3] + ratio * pose1[:3, 3]
+                    self.poses.append(pose)
+
+                    # Transform the ngp pose back to opengl form so that we can write back to json file
+                    pose_opengl = ngp_matrix_to_nerf(pose, scale = self.scale)
+                    poses_in_opengl.append(pose_opengl)
+
+                if (write_cam_tra_json(old_json = transform, poses = poses_in_opengl, target_path = cam_tra_path)):
+                    print("New camera trajectory generated and saved.")
+                else:
+                    print("The process failed, some error occurs, check it again.")
 
         else:
             # for colmap, manually split a valid set (the first frame).

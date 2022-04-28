@@ -1,3 +1,6 @@
+import os
+os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+
 import torch
 import argparse
 
@@ -31,7 +34,7 @@ if __name__ == '__main__':
     parser.add_argument('--tcnn', action='store_true', help="use TCNN backend")
 
     ### dataset options
-    parser.add_argument('--mode', type=str, default='colmap', help="dataset mode, supports (colmap, blender)")
+    parser.add_argument('--mode', type=str, default='colmap', help="dataset mode, supports (colmap, blender, agi)")
     parser.add_argument('--preload', action='store_true', help="preload all data into GPU, accelerate training but use more GPU memory")
     # (the default value is for the fox dataset)
     parser.add_argument('--bound', type=float, default=2, help="assume the scene is bounded in box[-bound, bound]^3, if > 1, will invoke adaptive ray marching.")

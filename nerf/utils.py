@@ -8,6 +8,7 @@ import tensorboardX
 
 import numpy as np
 import pandas as pd
+import imageio
 
 import time
 from datetime import datetime
@@ -245,7 +246,7 @@ class Trainer(object):
         self.opt = opt
         self.mute = mute
         self.metrics = metrics
-        self.local_rank = local_rank
+        self.local_rank = local_rank # sam
         self.world_size = world_size
         self.workspace = workspace
         self.ema_decay = ema_decay
@@ -466,12 +467,13 @@ class Trainer(object):
         if bg_color is not None:
             bg_color = bg_color.to(self.device)
 
-        outputs = self.model.render(rays_o, rays_d, staged=True, bg_color=bg_color, perturb=perturb, **vars(self.opt))
+        outputs = self.model.render(rays_o, rays_d, staged=True, bg_color=bg_color, perturb=perturb, **vars(self.opt)) # TODO: add ['disp_map'] in render
 
         pred_rgb = outputs['image'].reshape(-1, H, W, 3)
         pred_depth = outputs['depth'].reshape(-1, H, W)
+        pred_disp = outputs['disp_map'].reshape(-1, H, W)
 
-        return pred_rgb, pred_depth
+        return pred_rgb, pred_depth, pred_disp
 
 
     def save_mesh(self, save_path=None, resolution=256, threshold=10):
@@ -539,6 +541,9 @@ class Trainer(object):
         self.log(f"==> Start Test, save results to {save_path}")
 
         pbar = tqdm.tqdm(total=len(loader) * loader.batch_size, bar_format='{percentage:3.0f}% {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]')
+        rgbs = []
+        depths = []
+        disps = []
         self.model.eval()
         with torch.no_grad():
 
@@ -550,18 +555,39 @@ class Trainer(object):
             for i, data in enumerate(loader):
                 
                 with torch.cuda.amp.autocast(enabled=self.fp16):
-                    preds, preds_depth = self.test_step(data)                
+                    preds, preds_depth, pred_disp = self.test_step(data)  # sam
                 
-                path = os.path.join(save_path, f'{i:04d}.png')
-                path_depth = os.path.join(save_path, f'{i:04d}_depth.png')
+                #path = os.path.join(save_path, f'{i:04d}.png')
+                #path_depth = os.path.join(save_path, f'{i:04d}_depth.png')
 
                 #self.log(f"[INFO] saving test image to {path}")
 
-                cv2.imwrite(path, cv2.cvtColor((preds[0].detach().cpu().numpy() * 255).astype(np.uint8), cv2.COLOR_RGB2BGR))
-                cv2.imwrite(path_depth, (preds_depth[0].detach().cpu().numpy() * 255).astype(np.uint8))
+                #cv2.imwrite(path, cv2.cvtColor((preds[0].detach().cpu().numpy() * 255).astype(np.uint8), cv2.COLOR_RGB2BGR))
+                #cv2.imwrite(path_depth, (preds_depth[0].detach().cpu().numpy() * 255).astype(np.uint8))
+
+                rgb = cv2.cvtColor((preds[0].detach().cpu().numpy() * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
+                depth = (preds_depth[0].detach().cpu().numpy() * 255).astype(np.uint8)
+                disp = pred_disp[0].detach().cpu().numpy()
+
+                rgbs.append(cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB))
+                depths.append(depth)
+                disps.append(disp)
+
 
                 pbar.update(loader.batch_size)
 
+        
+        imageio.mimwrite(os.path.join(save_path,'rgb.mp4') , rgbs+list(reversed(rgbs)) , fps=30, quality=8)
+        
+        imageio.mimwrite(os.path.join(save_path,'depth.mp4'), depths+list(reversed(depths)), fps=30, quality=8)
+        
+        disps_max = np.percentile(np.array(disps), 95)
+        disps_min = np.percentile(np.array(disps), 5)
+        print(f"disp  disps_max: {disps_max}, disps_min: {disps_min}")
+        
+        disps = [np.clip(((i-disps_min)/(disps_max-disps_min)*255), 0, 255).astype(np.uint8) for i in disps]
+        imageio.mimwrite(os.path.join(save_path,'disp.mp4'), disps+list(reversed(disps)), fps=30, quality=8)
+        
         self.log(f"==> Finished Test.")
     
     # [GUI] just train for 16 steps, without any other overhead that may slow down rendering.

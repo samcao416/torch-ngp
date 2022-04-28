@@ -39,14 +39,14 @@ class NeRFNetwork(NeRFRenderer):
             else:
                 out_dim = hidden_dim
             
-            sigma_net.append(nn.Linear(in_dim, out_dim, bias=False))
+            sigma_net.append(nn.Linear(in_dim, out_dim, bias=False)) # {in_dim, hidden_dim, 1 + geo_feat_dim}
 
         self.sigma_net = nn.ModuleList(sigma_net)
 
         # color network
         self.num_layers_color = num_layers_color        
         self.hidden_dim_color = hidden_dim_color
-        self.encoder_dir, self.in_dim_color = get_encoder(encoding_dir)
+        self.encoder_dir, self.in_dim_color = get_encoder(encoding_dir) #TODO: read the encoder
         self.in_dim_color += self.geo_feat_dim
         
         color_net =  []
@@ -63,7 +63,7 @@ class NeRFNetwork(NeRFRenderer):
             
             color_net.append(nn.Linear(in_dim, out_dim, bias=False))
 
-        self.color_net = nn.ModuleList(color_net)
+        self.color_net = nn.ModuleList(color_net) #{ get_encoder->in_dim_color + geo_feat_dm, hidden_dim, hidden_dim, 3}
 
     
     def forward(self, x, d):
@@ -75,12 +75,12 @@ class NeRFNetwork(NeRFRenderer):
 
         h = x
         for l in range(self.num_layers):
-            h = self.sigma_net[l](h)
+            h = self.sigma_net[l](h) #TODO: checkout the meaning of (h)
             if l != self.num_layers - 1:
                 h = F.relu(h, inplace=True)
 
         #sigma = F.relu(h[..., 0])
-        sigma = trunc_exp(h[..., 0])
+        sigma = trunc_exp(h[..., 0]) # Notice : Different from Ds_ngp version
         geo_feat = h[..., 1:]
 
         # color
@@ -116,7 +116,7 @@ class NeRFNetwork(NeRFRenderer):
             'geo_feat': geo_feat,
         }
 
-    # allow masked inference
+    # allow masked inference # Notice: Added in the current version
     def color(self, x, d, mask=None, geo_feat=None, **kwargs):
         # x: [N, 3] in [-bound, bound]
         # mask: [N,], bool, indicates where we actually needs to compute rgb.
